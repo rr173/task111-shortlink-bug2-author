@@ -92,14 +92,56 @@ func (s *Service) BulkCreate(ctx context.Context, reqs []CreateReq) ([]store.Lin
 		return nil, err
 	}
 	out := make([]store.Link, 0, len(reqs))
+	seen := make(map[string]struct{}, len(reqs))
 	for _, r := range reqs {
-		l, err := s.Create(ctx, r)
-		if err != nil {
+		if err := ValidateCreate(r); err != nil {
 			return nil, err
 		}
-		out = append(out, l)
+		r.Owner = NormalizeOwner(r.Owner)
+		code := idgen.CanonicalCode(r.CustomCode)
+		if code == "" {
+			var err error
+			code, err = idgen.UniqueCode(6, 8, func(candidate string) bool {
+				if _, ok := seen[candidate]; ok {
+					return true
+				}
+				l, e := s.store.GetLinkByCode(ctx, candidate)
+				if e != nil {
+					return true
+				}
+				return l.Code != ""
+			})
+			if err != nil {
+				return nil, fmt.Errorf("generate code: %w", err)
+			}
+		} else {
+			if _, ok := seen[code]; ok {
+				return nil, fmt.Errorf("code %q appears more than once in batch", code)
+			}
+			existing, err := s.store.GetLinkByCode(ctx, code)
+			if err != nil {
+				return nil, err
+			}
+			if existing.Code != "" {
+				return nil, fmt.Errorf("code %q already exists", code)
+			}
+		}
+		seen[code] = struct{}{}
+		out = append(out, store.Link{
+			Code:        code,
+			TargetURL:   r.TargetURL,
+			Owner:       r.Owner,
+			Description: r.Description,
+			ExpiresAt:   r.ExpiresAt,
+			MaxClicks:   r.MaxClicks,
+			CustomAlias: r.CustomCode != "",
+		})
 	}
-	return out, nil
+	created, err := s.store.InsertLinksAtomic(ctx, out)
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
 // Resolve 解析短码并返回可跳转的链接；不存在、过期或达点击上限时返回对应错误。

@@ -152,6 +152,38 @@ func (s *Store) InsertLink(ctx context.Context, l Link) (Link, error) {
 	return l, nil
 }
 
+// InsertLinksAtomic persists a batch in one transaction so a rejected item
+// cannot leave earlier items visible.
+func (s *Store) InsertLinksAtomic(ctx context.Context, links []Link) ([]Link, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin batch insert: %w", err)
+	}
+	for i := range links {
+		if links[i].CreatedAt == 0 {
+			links[i].CreatedAt = time.Now().UnixMilli()
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO links (code, target_url, owner, description, created_at, expires_at, max_clicks, custom_alias)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			links[i].Code, links[i].TargetURL, links[i].Owner, links[i].Description,
+			links[i].CreatedAt, links[i].ExpiresAt, links[i].MaxClicks, boolToInt(links[i].CustomAlias))
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("insert batch link %q: %w", links[i].Code, err)
+		}
+		links[i].ID, err = res.LastInsertId()
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("batch last insert id: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit batch insert: %w", err)
+	}
+	return links, nil
+}
+
 // GetLinkByCode 按短码读取链接；不存在时返回 (Link{}, nil)。
 func (s *Store) GetLinkByCode(ctx context.Context, code string) (Link, error) {
 	row := s.db.QueryRowContext(ctx,
